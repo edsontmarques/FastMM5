@@ -694,13 +694,17 @@ function FastMM_FreeDebugSupportLibrary: Boolean;
 {Enters/exits debug mode.  Calls may be nested, in which case debug mode is only exited when the number of
 FastMM_ExitDebugMode calls equal the number of FastMM_EnterDebugMode calls.  In debug mode extra metadata is logged
 before and after the user data in the block, and extra checks are performed in order to catch common programming
-errors.  Returns True on success, False if this memory manager instance is not currently installed or the installed
-memory manager has changed.  Note that debug mode comes with a severe performance penalty, and due to the extra
-metadata all blocks that are allocated while debug mode is active will use significantly more address space.}
+errors.  Returns True if the mode was changed successfully, False if this memory manager instance is not currently
+installed or the installed memory manager has changed.  Important notes:
+  1) The internal counter is updated regardless of the return value of FastMM_EnterDebugMode and FastMM_ExitDebugMode,
+  so always match the number of FastMM_EnterDebugMode and FastMM_ExitDebugMode calls inside a block of code to ensure
+  that the mode is restored to the previous state on exit.  (This also means it is safe to ignore the return value.)
+  2) Debug mode comes with a severe performance penalty, and due to the extra metadata all blocks that are allocated
+  while debug mode is active will use significantly more address space.}
 function FastMM_EnterDebugMode: Boolean;
 function FastMM_ExitDebugMode: Boolean;
 {Returns True if debug mode is currently active, i.e. FastMM_EnterDebugMode has been called more times than
-FastMM_ExitDebugMode.}
+FastMM_ExitDebugMode and the last Enter/Exit call was successful (i.e. returned True).}
 function FastMM_DebugModeActive: Boolean;
 
 {Gets and sets the options that should apply when debug mode is active, i.e. FastMM_DebugModeActive = True.  The initial
@@ -712,26 +716,27 @@ procedure FastMM_SetDebugModeOptions(ADebugModeOptions: TFastMM_DebugModeOptions
 
 {Enables/disables the erasure of the content of newly allocated blocks.  Calls may be nested, in which case erasure is
 only disabled when the number of FastMM_EndEraseAllocatedBlockContent calls equal the number of
-FastMM_BeginEraseAllocatedBlockContent calls.  When enabled the content of all newly allocated blocks is filled with the
-debug pattern $90909090 before being passed to the application.  This may help catch application bugs involving the use
-of uninitialized memory.  Note that this is a subset of the debug mode functionality, and is implicitly enabled
-in debug mode.}
+FastMM_BeginEraseAllocatedBlockContent calls.  Note that the internal nested call counter is updated even if these
+functions return False.  When enabled the content of all newly allocated blocks is filled with the debug pattern
+$90909090 before being passed to the application.  This may help catch application bugs involving the use of
+uninitialized memory.  It is a subset of the debug mode functionality, and is implicitly enabled in debug mode.}
 function FastMM_BeginEraseAllocatedBlockContent: Boolean;
 function FastMM_EndEraseAllocatedBlockContent: Boolean;
 {Returns True if newly allocated blocks are currently erased, i.e. FastMM_BeginEraseAllocatedBlockContent has been
-called more times than FastMM_EndEraseAllocatedBlockContent.}
+called more times than FastMM_EndEraseAllocatedBlockContent and the last Begin/End call was successful (i.e. returned
+True).}
 function FastMM_EraseAllocatedBlockContentActive: Boolean;
 
 {Enables/disables the erasure of the content of freed blocks.  Calls may be nested, in which case erasure is only
 disabled when the number of FastMM_EndEraseFreedBlockContent calls equal the number of
-FastMM_BeginEraseFreedBlockContent calls.  When enabled the content of all freed blocks is filled with the debug pattern
-$80808080 before being returned to the memory pool.  This is useful for security purposes, and may also help catch "use
-after free" programming errors.  Note that this is a subset of the debug mode functionality, and is implicitly enabled
-in debug mode.}
+FastMM_BeginEraseFreedBlockContent calls.  Note that the internal nested call counter is updated even if these functions
+return False.  When enabled the content of all freed blocks is filled with the debug pattern $80808080 before being
+returned to the memory pool.  This is useful for security purposes, and may also help catch "use after free" programming
+errors.  It is a subset of the debug mode functionality, and is implicitly enabled in debug mode.}
 function FastMM_BeginEraseFreedBlockContent: Boolean;
 function FastMM_EndEraseFreedBlockContent: Boolean;
 {Returns True if free blocks are currently erased on free, i.e. FastMM_BeginEraseFreedBlockContent has been called more
-times than FastMM_EndEraseFreedBlockContent.}
+times than FastMM_EndEraseFreedBlockContent and the last Begin/End call was successful (i.e. returned True).}
 function FastMM_EraseFreedBlockContentActive: Boolean;
 
 {Gets/sets the depth of allocation and free stack traces in debug mode.  The minimum stack trace depth is 0, and the
@@ -2560,7 +2565,8 @@ begin
   Result := True;
 end;
 
-{Determines the size and state of the virtual memory region starting at APRegionStart.}
+{Determines the size and state of the virtual memory region starting at APRegionStart.  Returns a zero-filled structure
+on error.}
 procedure OS_GetVirtualMemoryRegionInfo(APRegionStart: Pointer; var AMemoryRegionInfo: TMemoryRegionInfo);
 var
   LMemInfo: TMemoryBasicInformation;
@@ -2767,7 +2773,8 @@ end;
 {Shows a message box if the program is not showing one already.}
 procedure OS_ShowMessageBox(APText, APCaption: PWideChar);
 begin
-  Winapi.Windows.MessageBoxW(0, APText, APCaption, MB_OK or MB_ICONERROR or MB_TASKMODAL or MB_DEFAULT_DESKTOP_ONLY);
+  Winapi.Windows.MessageBoxW(0, APText, APCaption, MB_OK or MB_ICONERROR or MB_TASKMODAL or MB_DEFAULT_DESKTOP_ONLY
+    or MB_SERVICE_NOTIFICATION);
 end;
 
 
@@ -3004,18 +3011,20 @@ var
           Exit(False);
         end;
 
+        {No more parent classes?}
+        if LParentClassSelfPointer = nil then
+          Exit(True);
+
+        {Recursively check the parent class for validity.}
+        Result := IsValidVMTAddress(LParentClassSelfPointer, True)
+          and InternalIsValidClass(LParentClassSelfPointer^, ADepth + 1);
+
       except
         {There is a potential race condition between the call to IsValidVMTAddress and the checks above:  If another
         thread frees the block at an inopportune moment then the reads above may cause an A/V.  If this happens then
         the AClassPointer cannot be a class.}
         Exit(False);
       end;
-      {No more parent classes?}
-      if LParentClassSelfPointer = nil then
-        Exit(True);
-      {Recursively check the parent class for validity.}
-      Result := IsValidVMTAddress(LParentClassSelfPointer, True)
-        and InternalIsValidClass(LParentClassSelfPointer^, ADepth + 1);
     end
     else
       Result := False;
@@ -4243,10 +4252,20 @@ begin
   begin
     PPointerArray(LPUserArea)[0] := TFastMM_FreedObject;
     {$ifdef 32Bit}
+    {Maintain QWord alignment of the start of the block.}
     PIntegerArray(LPUserArea)[1] := Integer(Cardinal($01010101) * CDebugFillByteFreedBlock);
     {$endif}
     Dec(LByteOffset, 8);
     Inc(LPUserArea, 8);
+
+    {FillChar was significantly improved in Delphi XE7, so use that for larger blocks.}
+    {$if CompilerVersion >= 28}
+    if LByteOffset >= 32 then
+    begin
+      FillChar(LPUserArea^, LByteOffset, CDebugFillByteFreedBlock);
+      Exit;
+    end;
+    {$endif}
   end;
 
   if LByteOffset and 1 <> 0 then
@@ -4284,6 +4303,15 @@ var
 begin
   LByteOffset := APDebugBlockHeader.UserSize;
   LPUserArea := PByte(APDebugBlockHeader) + CDebugBlockHeaderSize;
+
+  {FillChar was significantly improved in Delphi XE7, so use that for larger blocks.}
+  {$if CompilerVersion >= 28}
+  if LByteOffset >= 40 then
+  begin
+    FillChar(LPUserArea^, LByteOffset, CDebugFillByteAllocatedBlock);
+    Exit;
+  end;
+  {$endif}
 
   if LByteOffset and 1 <> 0 then
   begin
@@ -4405,59 +4433,69 @@ end;
 {Checks that the debug fill pattern in the debug block is intact.  Returns True if the block is intact, otherwise
 (optionally) logs and/or displays the error and returns False.}
 function CheckFreedDebugBlockFillPatternIntact(APDebugBlockHeader: PFastMM_DebugBlockHeader): Boolean;
+const
+  CDebugFillWordFreedBlock = CDebugFillByteFreedBlock * Word($0101);
+  CDebugFillDWordFreedBlock = CDebugFillByteFreedBlock * Cardinal($01010101);
+  CDebugFillQWordFreedBlock = CDebugFillByteFreedBlock * UInt64($0101010101010101);
 var
   LByteOffset: NativeInt;
-  LPUserArea: PByte;
+  LPBlockEnd: PByte;
   LFillPatternIntact: Boolean;
 begin
-  LByteOffset := APDebugBlockHeader.UserSize;
-  LPUserArea := PByte(APDebugBlockHeader) + CDebugBlockHeaderSize;
+  {Get a pointer to just after the block, and use a negative offset for traversal.}
+  LPBlockEnd := PByte(APDebugBlockHeader) + APDebugBlockHeader.UserSize + CDebugBlockHeaderSize;
+  LByteOffset := - APDebugBlockHeader.UserSize;
+
   LFillPatternIntact := True;
 
-  {If the block is large enough the first 4/8 bytes should be a pointer to the freed object class.}
-  if LByteOffset >= CTObjectInstanceSize then
+  {If the block is large enough to hold a TObject then the first 4/8 bytes should be a pointer to the freed object
+  class.}
+  if LByteOffset <= - CTObjectInstanceSize then
   begin
-    LFillPatternIntact := (PPointer(LPUserArea)^ = TFastMM_FreedObject)
-    {$ifdef 32Bit}
-      and (PIntegerArray(LPUserArea)[1] = Integer(Cardinal($01010101) * CDebugFillByteFreedBlock));
-    {$endif};
-    Dec(LByteOffset, 8);
-    Inc(LPUserArea, 8);
-  end;
+    LFillPatternIntact := PPointer(@LPBlockEnd[LByteOffset])^ = TFastMM_FreedObject;
+    Inc(LByteOffset, SizeOf(Pointer));
 
-  if LByteOffset and 1 <> 0 then
-  begin
-    Dec(LByteOffset);
-    if LPUserArea[LByteOffset] <> CDebugFillByteFreedBlock then
-      LFillPatternIntact := False;
-  end;
-
-  if LByteOffset and 2 <> 0 then
-  begin
-    Dec(LByteOffset, 2);
-    if PWord(@LPUserArea[LByteOffset])^ <> Word($0101) * CDebugFillByteFreedBlock then
-      LFillPatternIntact := False;
-  end;
-
-  if LByteOffset and 4 <> 0 then
-  begin
-    Dec(LByteOffset, 4);
-    if PCardinal(@LPUserArea[LByteOffset])^ <> Cardinal($01010101) * CDebugFillByteFreedBlock then
-      LFillPatternIntact := False;
-  end;
-
-  {Loop over the remaining 8 byte chunks using a negative offset.}
-  Inc(LPUserArea, LByteOffset);
-  LByteOffset := - LByteOffset;
-  while LByteOffset < 0 do
-  begin
-    if PUInt64(@LPUserArea[LByteOffset])^ <> UInt64($0101010101010101) * CDebugFillByteFreedBlock then
+    {Check chunks of 32 bytes in a loop.}
+    while LByteOffset <= -32 do
     begin
-      LFillPatternIntact := False;
-      Break;
+      LFillPatternIntact := (PUInt64(@LPBlockEnd[LByteOffset])^ = CDebugFillQWordFreedBlock)
+        and LFillPatternIntact;
+      LFillPatternIntact := (PUInt64(@LPBlockEnd[LByteOffset + 8])^ = CDebugFillQWordFreedBlock)
+        and LFillPatternIntact;
+      LFillPatternIntact := (PUInt64(@LPBlockEnd[LByteOffset + 16])^ = CDebugFillQWordFreedBlock)
+        and LFillPatternIntact;
+      LFillPatternIntact := (PUInt64(@LPBlockEnd[LByteOffset + 24])^ = CDebugFillQWordFreedBlock)
+        and LFillPatternIntact;
+      Inc(LByteOffset, 32);
     end;
 
+  end;
+
+  while LByteOffset <= -8 do
+  begin
+    LFillPatternIntact := (PUInt64(@LPBlockEnd[LByteOffset])^ = CDebugFillQWordFreedBlock)
+      and LFillPatternIntact;
     Inc(LByteOffset, 8);
+  end;
+
+  if LByteOffset <= -4 then
+  begin
+    LFillPatternIntact := (PCardinal(@LPBlockEnd[LByteOffset])^ = CDebugFillDWordFreedBlock)
+      and LFillPatternIntact;
+    Inc(LByteOffset, 4);
+  end;
+
+  if LByteOffset <= -2 then
+  begin
+    LFillPatternIntact := (PWord(@LPBlockEnd[LByteOffset])^ = CDebugFillWordFreedBlock)
+      and LFillPatternIntact;
+    Inc(LByteOffset, 2);
+  end;
+
+  if LByteOffset < 0 then
+  begin
+    LFillPatternIntact := (LPBlockEnd[LByteOffset] = CDebugFillByteFreedBlock)
+      and LFillPatternIntact;
   end;
 
   if not LFillPatternIntact then
@@ -4634,8 +4672,8 @@ end;
 {------------Invalid Free/realloc handling-----------}
 {----------------------------------------------------}
 
-{Always returns - 1.}
-function HandleInvalidFreeMemOrReallocMem(APointer: Pointer; AIsReallocMemCall: Boolean): Integer;
+{Logs an invalid FreeMem or ReallocMem attempt, if possible.}
+procedure LogInvalidFreeMemOrReallocMem(APointer: Pointer; AIsReallocMemCall: Boolean);
 var
   LPDebugBlockHeader: PFastMM_DebugBlockHeader;
   LHeaderChecksum: NativeUInt;
@@ -4646,13 +4684,13 @@ begin
   {Is this a debug block that has already been freed?  If not, it could be a bad pointer value, in which case there's
   not much that can be done to provide additional error information.}
   if PBlockStatusFlags(APointer)[-1] <> (CBlockIsFreeFlag or CIsDebugBlockFlag) then
-    Exit(-1);
+    Exit;
 
   {Check that the debug block header is intact.  If it is, then a meaningful error may be returned.}
   LPDebugBlockHeader := @PFastMM_DebugBlockHeader(APointer)[-1];
   LHeaderChecksum := LPDebugBlockHeader.CalculateHeaderCheckSum;
   if LPDebugBlockHeader.HeaderCheckSum <> LHeaderChecksum then
-    Exit(-1);
+    Exit;
 
   LTokenValues := Default(TEventLogTokenValues);
 
@@ -4664,10 +4702,23 @@ begin
     LogEvent(mmetDebugBlockReallocOfFreedBlock, LTokenValues)
   else
     LogEvent(mmetDebugBlockDoubleFree, LTokenValues);
+end;
+
+{Called by FastMM_FreeMem if APointer does not point to a block that can be freed.  Always returns -1}
+function HandleInvalidFreeMem(APointer: Pointer): Integer;
+begin
+  LogInvalidFreeMemOrReallocMem(APointer, False);
 
   Result := -1;
 end;
 
+{Called by FastMM_ReallocMem if APointer does not point to a block that can be freed.  Always returns nil.}
+function HandleInvalidReallocMem(APointer: Pointer): Pointer;
+begin
+  LogInvalidFreeMemOrReallocMem(APointer, True);
+
+  Result := nil;
+end;
 
 {-----------------------------------------}
 {--------Large block management-----------}
@@ -4890,12 +4941,12 @@ begin
     while True do
     begin
       LOldPendingFreeList := LPLargeBlockManager.PendingFreeList;
-      PPointer(APLargeBlock)^ := LOldPendingFreeList;
 
       {Try to catch an immediate double-free attempt on the same block.  A double-free nested deeper in the pending free
       list will still not be caught, but this may help and it is cheap.}
       if LOldPendingFreeList <> APLargeBlock then
       begin
+        PPointer(APLargeBlock)^ := LOldPendingFreeList;
         if AtomicCmpExchange(LPLargeBlockManager.PendingFreeList, APLargeBlock, LOldPendingFreeList) = LOldPendingFreeList then
           Break;
       end
@@ -5211,7 +5262,9 @@ begin
       Break;
 
     {There's no need to update the ABA counter, since the medium block manager is locked and no other thread can thus
-    change the sequential feed span.}
+    change the sequential feed span.  After the new span is installed it is also impossible for the new offset to equal
+    the old offset, since spans are several multiples of the largest medium block size and the remainder is only binned
+    when the available size falls below what is required for a medium block allocation.}
     if AtomicCmpExchange(APMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue, CMediumBlockSpanHeaderSize,
       LPreviousLastSequentialFeedBlockOffset) = LPreviousLastSequentialFeedBlockOffset then
     begin
@@ -5223,8 +5276,10 @@ begin
       {Point to the remainder}
       LPRemainderBlock := Pointer(PByte(APMediumBlockManager.SequentialFeedMediumBlockSpan) + CMediumBlockSpanHeaderSize);
 
-      {Can the next block be combined with the remainder?}
-      if BlockIsFree(LPNextMediumBlock) then
+      {Potentially combine the remainder with the next block, if it is free.  In debug mode medium blocks are normally
+      not merged with adjacent free blocks, except if the next block does not contain any debug info.}
+      if BlockIsFree(LPNextMediumBlock)
+        and (MayMergeFreeMediumBlocks or (not BlockHasDebugInfo(LPNextMediumBlock))) then
       begin
         LNextBlockSize := GetMediumBlockSize(LPNextMediumBlock);
         {Increase the size of this block}
@@ -5389,12 +5444,12 @@ begin
     while True do
     begin
       LFirstPendingFreeBlock := LPMediumBlockManager.PendingFreeList;
-      PPointer(APMediumBlock)^ := LFirstPendingFreeBlock;
 
       {Try to catch an immediate double-free attempt on the same block.  A double-free nested deeper in the pending free
       list will still not be caught, but this may help and it is cheap.}
       if LFirstPendingFreeBlock <> APMediumBlock then
       begin
+        PPointer(APMediumBlock)^ := LFirstPendingFreeBlock;
         if AtomicCmpExchange(LPMediumBlockManager.PendingFreeList, APMediumBlock, LFirstPendingFreeBlock) = LFirstPendingFreeBlock then
           Break;
       end
@@ -6638,6 +6693,17 @@ begin
 
 end;
 
+function IsSmallBlock(APBlock: Pointer): Boolean; inline;
+begin
+  Result := (PSmallBlockHeader(APBlock)[-1].BlockStatusFlagsAndSpanOffset and CIsSmallBlockFlag) <> 0;
+end;
+
+function IsSmallBlockWithDebugInfo(APBlock: Pointer): Boolean; inline;
+begin
+  Result := (PSmallBlockHeader(APBlock)[-1].BlockStatusFlagsAndSpanOffset
+    and (CIsSmallBlockFlag + CHasDebugInfoFlag)) = CIsSmallBlockFlag + CHasDebugInfoFlag;
+end;
+
 function GetSpanForSmallBlock(APSmallBlock: Pointer): PSmallBlockSpanHeader; inline;
 begin
   Result := Pointer((NativeInt(APSmallBlock) and -CMediumBlockAlignment)
@@ -6730,7 +6796,7 @@ begin
   {Is the entire span now free? -> Free it, unless debug mode is active.  BlocksInUse is set to the maximum that will
   fit in the span when the span is added as the sequential feed span, so this can only hit zero once all the blocks have
   been fed sequentially and subsequently freed.}
-  if (APSmallBlockSpan.BlocksInUse <> 0) or MayFreeSmallBlockSpans then
+  if (APSmallBlockSpan.BlocksInUse <> 0) or (not MayFreeSmallBlockSpans) then
   begin
     LOldFirstFreeBlock := APSmallBlockSpan.FirstFreeBlock;
 
@@ -6847,12 +6913,12 @@ begin
     while True do
     begin
       LOldFirstFreeBlock := LPSmallBlockManager.PendingFreeList;
-      PPointer(APSmallBlock)^ := LOldFirstFreeBlock;
 
       {Try to catch an immediate double-free attempt on the same block.  A double-free nested deeper in the pending free
       list will still not be caught, but this may help and it is cheap.}
       if LOldFirstFreeBlock <> APSmallBlock then
       begin
+        PPointer(APSmallBlock)^ := LOldFirstFreeBlock;
         if AtomicCmpExchange(LPSmallBlockManager.PendingFreeList, APSmallBlock, LOldFirstFreeBlock) = LOldFirstFreeBlock then
           Break;
       end
@@ -6902,16 +6968,18 @@ asm
   movzx ecx, TSmallBlockManager(esi).BlockSize
   div ecx
 
-  {Update the medium block header to indicate that this medium block serves as a small block span.}
-  mov TMediumBlockHeader.IsSmallBlockSpan(ebx - CMediumBlockHeaderSize), True
-
   {Set up the block span.  Blocks that will eventually be fed sequentially are counted as in use.}
   mov TSmallBlockSpanHeader(ebx).SmallBlockManager, esi
   mov TSmallBlockSpanHeader(ebx).FirstFreeBlock, 0
   mov TSmallBlockSpanHeader(ebx).TotalBlocksInSpan, eax
   mov TSmallBlockSpanHeader(ebx).BlocksInUse, eax
 
-  {This is the new sequential feed span.  This must be set before the offset is set.}
+  {Update the medium block header to indicate that this medium block serves as a small block span.  This flag must be
+  set after the small block manager pointer in the header is set in case FastMM_WalkBlocks is scanning this medium
+  block concurrently.}
+  mov TMediumBlockHeader.IsSmallBlockSpan(ebx - CMediumBlockHeaderSize), True
+
+  {Set it as the sequential feed span.  This must be done before the sequential feed offset is set.}
   mov TSmallBlockManager(esi).SequentialFeedSmallBlockSpan, ebx
 
   {Get the offset of the last block in eax}
@@ -6919,7 +6987,7 @@ asm
   mul ecx
   add eax, CSmallBlockSpanHeaderSize
 
-  {Set the span up for sequential block serving}
+  {Set it up for sequential block serving.  The sequential feed span must be set before the sequential feed offset.}
   mov TSmallBlockManager(esi).LastSmallBlockSequentialFeedOffset.IntegerValue, eax
   mov TSmallBlockManager(esi).SmallBlockManagerLocked, 0
 
@@ -6955,33 +7023,40 @@ begin
     Exit(nil);
   end;
 
-  {Update the medium block header to indicate that this medium block serves as a small block span.}
-  SetMediumBlockHeader_SetIsSmallBlockSpan(LPSmallBlockSpan, True);
-
   LSpanSize := GetMediumBlockSize(LPSmallBlockSpan);
 
-  {Set up the block span}
-  LPSmallBlockSpan.SmallBlockManager := APSmallBlockManager;
-  LPSmallBlockSpan.FirstFreeBlock := nil;
-  {Set it as the sequential feed span.  This must be done before the sequential feed offset is set.}
-  APSmallBlockManager.SequentialFeedSmallBlockSpan := LPSmallBlockSpan;
   {Calculate the number of small blocks that will fit inside the span.  We need to account for the span header, as well
   as the difference in the medium and small block header sizes for the last block.  All the sequential feed blocks are
   initially marked as used.  This implies that the sequential feed span can never be freed until all blocks have been
   fed sequentially.}
   LTotalBlocksInSpan := (LSpanSize - (CSmallBlockSpanHeaderSize + CMediumBlockHeaderSize - CSmallBlockHeaderSize))
     div APSmallBlockManager.BlockSize;
+
+  {Set up the block span.  Blocks that will eventually be fed sequentially are counted as in use.}
+  LPSmallBlockSpan.SmallBlockManager := APSmallBlockManager;
+  LPSmallBlockSpan.FirstFreeBlock := nil;
   LPSmallBlockSpan.TotalBlocksInSpan := LTotalBlocksInSpan;
   LPSmallBlockSpan.BlocksInUse := LTotalBlocksInSpan;
 
   {Memory fence required for ARM here.}
 
-  {Set it up for sequential block serving}
+  {Update the medium block header to indicate that this medium block serves as a small block span.  This flag must be
+  set after the small block manager pointer in the header is set in case FastMM_WalkBlocks is scanning this medium
+  block concurrently.}
+  SetMediumBlockHeader_SetIsSmallBlockSpan(LPSmallBlockSpan, True);
+
+  {Set it as the sequential feed span.  This must be done before the sequential feed offset is set.}
+  APSmallBlockManager.SequentialFeedSmallBlockSpan := LPSmallBlockSpan;
+
+  {Memory fence required for ARM here.}
+
+  {Set it up for sequential block serving.  The sequential feed span must be set before the sequential feed offset.}
   LLastBlockOffset := CSmallBlockSpanHeaderSize + APSmallBlockManager.BlockSize * (LTotalBlocksInSpan - 1);
   APSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerValue := LLastBlockOffset;
 
   APSmallBlockManager.SmallBlockManagerLocked := 0;
 
+  {Return the last block in the span}
   Result := PByte(LPSmallBlockSpan) + LLastBlockOffset;
 
   {Set the header for the returned block.}
@@ -7271,10 +7346,7 @@ begin
   if BlockHasDebugInfo(Result) then
   begin
     if not CheckFreeDebugBlockIntact(Result) then
-    begin
-      APSmallBlockManager.SmallBlockManagerLocked := 0;
       System.Error(reInvalidPtr);
-    end;
 
     {Reset the debug info flag in the block.}
     SetBlockHasDebugInfo(Result, False);
@@ -7871,7 +7943,6 @@ asm
   {The small block manager is currently locked, so we need to add this block to its pending free list.}
 @ManagerCurrentlyLocked:
   mov eax, TSmallBlockManager(esi).PendingFreeList
-  mov [edx], eax
 
   {Try to catch an immediate double-free attempt on the same block.  A double-free nested deeper in the pending free
   list will still not be caught, but this may help and it is cheap.}
@@ -7881,6 +7952,7 @@ asm
   call System.Error
 @NotDoubleFreeAttempt:
 
+  mov [edx], eax
   lock cmpxchg TSmallBlockManager(esi).PendingFreeList, edx
   jne @ManagerCurrentlyLocked
 
@@ -7901,8 +7973,7 @@ asm
   cmp edx, CIsDebugBlockFlag
   je FastMM_FreeMem_FreeDebugBlock
 
-  xor edx,edx
-  jmp HandleInvalidFreeMemOrReallocMem
+  jmp HandleInvalidFreeMem
 {$else}
 
   {--------x64 Assembly language codepath---------}
@@ -7965,7 +8036,6 @@ asm
   {The small block manager is currently locked, so we need to add this block to its pending free list.}
 @ManagerCurrentlyLocked:
   mov rax, TSmallBlockManager(rsi).PendingFreeList
-  mov [rdx], rax
 
   {Try to catch an immediate double-free attempt on the same block.  A double-free nested deeper in the pending free
   list will still not be caught, but this may help and it is cheap.}
@@ -7975,6 +8045,7 @@ asm
   call System.Error
 @NotDoubleFreeAttempt:
 
+  mov [rdx], rax
   lock cmpxchg TSmallBlockManager(rsi).PendingFreeList, rdx
   jne @ManagerCurrentlyLocked
 
@@ -7994,10 +8065,11 @@ asm
 
   cmp edx, CIsLargeBlockFlag
   je FastMM_FreeMem_FreeLargeBlock
+
   cmp eax, CIsDebugBlockFlag
   je FastMM_FreeMem_FreeDebugBlock
-  xor edx,edx
-  jmp HandleInvalidFreeMemOrReallocMem
+
+  jmp HandleInvalidFreeMem
 @Done:
 
 {$endif}
@@ -8033,7 +8105,7 @@ begin
         end
         else
         begin
-          Result := HandleInvalidFreeMemOrReallocMem(APointer, False);
+          Result := HandleInvalidFreeMem(APointer);
         end;
       end;
     end;
@@ -8081,8 +8153,7 @@ asm
   cmp word ptr [eax - CBlockStatusFlagsSize], CIsDebugBlockFlag
   je FastMM_ReallocMem_ReallocDebugBlock
 
-  xor edx,edx
-  jmp HandleInvalidFreeMemOrReallocMem
+  jmp HandleInvalidReallocMem
 {$else}
   {--------x64 Assembly language codepath---------}
   .noframe
@@ -8106,8 +8177,7 @@ asm
   cmp r8d, CIsDebugBlockFlag
   je FastMM_ReallocMem_ReallocDebugBlock
 
-  xor edx,edx
-  jmp HandleInvalidFreeMemOrReallocMem
+  jmp HandleInvalidReallocMem
 
 {$endif}
 {$else}
@@ -8143,8 +8213,7 @@ begin
         end
         else
         begin
-          HandleInvalidFreeMemOrReallocMem(APointer, True);
-          Result := nil;
+          Result := HandleInvalidReallocMem(APointer);
         end;
       end;
 
@@ -8260,8 +8329,8 @@ begin
     {Catch an attempt to reallocate a freed block.}
     if LBlockHeader and CBlockIsFreeFlag <> 0 then
     begin
-      HandleInvalidFreeMemOrReallocMem(APointer, True);
-      Exit(nil);
+      Result := HandleInvalidReallocMem(APointer);
+      Exit;
     end;
 
     {The old block is not a debug block, so we need to allocate a new debug block and copy the data across.}
@@ -8516,11 +8585,12 @@ begin
 end;
 
 {Adjusts the block information for blocks that contain a debug mode sub-block.  Returns True if the allocation group for
-the block is within the given range, False otherwise.}
+the block is within the given range, False otherwise.  If AMayCheckForDebugInfo = True then the block header will be
+trusted and the block will checked for debug info, otherwise the block will be assumed to not contain debug info.}
 function FastMM_WalkBlocks_CheckAndAdjustForDebugSubBlock(var ABlockInfo: TFastMM_WalkAllocatedBlocks_BlockInfo;
-  AMinimumAllocationGroup, AMaximumAllocationGroup: Cardinal): Boolean; inline;
+  AMinimumAllocationGroup, AMaximumAllocationGroup: Cardinal; AMayCheckForDebugInfo: Boolean): Boolean; inline;
 begin
-  if BlockHasDebugInfo(ABlockInfo.BlockAddress) then
+  if AMayCheckForDebugInfo and BlockHasDebugInfo(ABlockInfo.BlockAddress) then
   begin
     ABlockInfo.DebugInformation := ABlockInfo.BlockAddress;
     ABlockInfo.UsableSize := ABlockInfo.DebugInformation.UserSize;
@@ -8578,12 +8648,15 @@ var
   LPMediumBlock: Pointer;
   LBlockOffsetFromMediumSpanStart, LMediumBlockSize, LSmallBlockOffset, LLastBlockOffset: Integer;
   LPSmallBlockManager: PSmallBlockManager;
+  LPDebugHeader: PFastMM_DebugBlockHeader;
+  LMayCheckForDebugInfo: Boolean;
 begin
   {Assume success, i.e. that all arenas will be walked.  This will be reset to False if a lock timeout occurs.}
   Result := True;
 
   LTimestampMilliseconds := 0;
 
+  LBlockInfo := Default(TFastMM_WalkAllocatedBlocks_BlockInfo);
   LBlockInfo.UserData := AUserData;
 
   if AWalkBlockTypes = [] then
@@ -8598,13 +8671,6 @@ begin
   if btLargeBlock in AWalkBlockTypes then
   begin
     LBlockInfo.BlockType := btLargeBlock;
-    LBlockInfo.BlockIsFree := False;
-
-    {Clear the fields that are not applicable to large blocks.}
-    LBlockInfo.IsSequentialFeedMediumBlockSpan := False;
-    LBlockInfo.MediumBlockSequentialFeedSpanUnusedBytes := 0;
-    LBlockInfo.SmallBlockSpanBlockSize := 0;
-    LBlockInfo.IsSequentialFeedSmallBlockSpan := False;
 
     for LArenaIndex := 0 to CFastMM_LargeBlockArenaCount - 1 do
     begin
@@ -8635,8 +8701,11 @@ begin
           LBlockInfo.BlockSize := LPLargeBlockHeader.ActualBlockSize;
           LBlockInfo.UsableSize := LPLargeBlockHeader.UserAllocatedSize;
 
-          if FastMM_WalkBlocks_CheckAndAdjustForDebugSubBlock(LBlockInfo, AMinimumAllocationGroup, AMaximumAllocationGroup) then
+          if FastMM_WalkBlocks_CheckAndAdjustForDebugSubBlock(LBlockInfo, AMinimumAllocationGroup,
+            AMaximumAllocationGroup, True) then
+          begin
             ACallBack(LBlockInfo);
+          end;
 
           LPLargeBlockHeader := LPLargeBlockHeader.NextLargeBlockHeader;
         end;
@@ -8758,6 +8827,9 @@ begin
 
                   if LLockWaitTimeMilliseconds > ALockTimeoutMilliseconds then
                   begin
+                    {A timeout while attempting to lock the small block manager will cause the span to be reported as a
+                    medium block instead.  This should happen very infrequently, and since small block spans are
+                    relatively small it should not skew results materially.}
                     Result := False;
                     LPSmallBlockManager := nil;
                     LSmallBlockOffset := 0;
@@ -8801,6 +8873,7 @@ begin
                     LBlockInfo.BlockAddress := LPMediumBlock;
                     LBlockInfo.BlockSize := LMediumBlockSize;
                     LBlockInfo.ArenaIndex := Byte(LArenaIndex);
+                    LBlockInfo.IsSequentialFeedMediumBlockSpan := False;
                     LBlockInfo.MediumBlockSequentialFeedSpanUnusedBytes := 0;
 
                     if LPSmallBlockManager <> nil then
@@ -8816,6 +8889,7 @@ begin
                         else
                           LBlockInfo.SmallBlockSequentialFeedSpanUnusedBytes := 0;
                         LBlockInfo.DebugInformation := nil;
+
                         ACallBack(LBlockInfo);
                       end;
                     end
@@ -8828,8 +8902,12 @@ begin
                         LBlockInfo.SmallBlockSpanBlockSize := 0;
                         LBlockInfo.IsSequentialFeedSmallBlockSpan := False;
                         LBlockInfo.SmallBlockSequentialFeedSpanUnusedBytes := 0;
-                        if FastMM_WalkBlocks_CheckAndAdjustForDebugSubBlock(LBlockInfo, AMinimumAllocationGroup, AMaximumAllocationGroup) then
+
+                        if FastMM_WalkBlocks_CheckAndAdjustForDebugSubBlock(LBlockInfo, AMinimumAllocationGroup,
+                          AMaximumAllocationGroup, True) then
+                        begin
                           ACallBack(LBlockInfo);
+                        end;
                       end;
                     end;
 
@@ -8858,8 +8936,21 @@ begin
                         LBlockInfo.SmallBlockSpanBlockSize := 0;
                         LBlockInfo.SmallBlockSequentialFeedSpanUnusedBytes := 0;
 
-                        if FastMM_WalkBlocks_CheckAndAdjustForDebugSubBlock(LBlockInfo, AMinimumAllocationGroup, AMaximumAllocationGroup) then
+                        {The header for a small block that is split off from the sequential feed span is set after
+                        allocation and without the protection of a lock, so there is a small but real chance that the
+                        header for a small block may not yet have been set by the thread that allocated it.  Small block
+                        spans may be recycled medium blocks, so the content is unpredictable.  Consequently we need to
+                        check the validity of the header.}
+                        LPDebugHeader := PFastMM_DebugBlockHeader(LBlockInfo.BlockAddress);
+                        LMayCheckForDebugInfo := IsSmallBlockWithDebugInfo(LPDebugHeader)
+                          and (GetSpanForSmallBlock(LPDebugHeader) = LPMediumBlock)
+                          and (LBlockInfo.UsableSize > (CDebugBlockHeaderSize + CalculateDebugBlockFooterSize(0)));
+
+                        if FastMM_WalkBlocks_CheckAndAdjustForDebugSubBlock(LBlockInfo, AMinimumAllocationGroup,
+                          AMaximumAllocationGroup, LMayCheckForDebugInfo) then
+                        begin
                           ACallBack(LBlockInfo);
+                        end;
                       end;
 
                       Inc(LSmallBlockOffset, LPSmallBlockManager.BlockSize);
@@ -8890,36 +8981,59 @@ begin
 end;
 
 procedure FastMM_ScanDebugBlocksForCorruption_CallBack(const ABlockInfo: TFastMM_WalkAllocatedBlocks_BlockInfo);
+const
+  CMaxCorruptionCheckAttempts = 100; //Excessively high, but insignificant relative to the cost of a false positive
+var
+  LRemainingAttempts: Integer;
 begin
   {If it is not a debug mode block then there's nothing to check.}
   if ABlockInfo.DebugInformation = nil then
     Exit;
 
-  {Check the block header and footer for corruption.}
-  if (ABlockInfo.DebugInformation.CalculateHeaderCheckSum <> ABlockInfo.DebugInformation.HeaderCheckSum)
-    or (ABlockInfo.DebugInformation.CalculateFooterCheckSum <> ABlockInfo.DebugInformation.DebugFooterPtr^) then
+  {When a debug block is freed or reallocated the debug information header and footer is updated without locking the
+  arena that owns the block.  While it is busy updating the debug information it temporarily clears the flag to indicate
+  that the block contains debug information, but a race condition remains:  The user size (and consequently the header
+  and footer checksums) may be changed several times due to successive FastMM_ReallocMem calls while inside this
+  callback.  In order to have a high degree of certainty that the block is actually corrupted we need run the check
+  multiple times:  If at any time the block is flagged as not having debug information or the checksums are valid then
+  we assume there is no corruption.
+
+  An additional problematic scenario is when a small block is split off from the sequential feed span:  Its header can
+  only be populated after the block has already been split off - without the protection of a lock.  It is therefore
+  possible that the (not yet valid) header for a small block may indicate that it contains debug information when it
+  actually does not.  We do basic validity checks on the block header in FastMM_WalkBlocks, but since the header is only
+  16 bits it is not inconceivable that an invalid header may appear valid.}
+
+  LRemainingAttempts := CMaxCorruptionCheckAttempts;
+  while True do
   begin
-    {The header and/or footer checksums are not currently correct, but that may just be due to a race condition:  When a
-    debug block is freed the debug header and footer are updated while the block manager is not yet locked, so we need
-    to check again whether the block is still flagged as having debug information, and if so, check its contents a
-    second time.}
-    if BlockHasDebugInfo(ABlockInfo.DebugInformation) then
+    {Check whether the header and footers checksums are currently valid.  If they are then break out of the loop.}
+    if (ABlockInfo.DebugInformation.CalculateHeaderCheckSum = ABlockInfo.DebugInformation.HeaderCheckSum)
+      and (ABlockInfo.DebugInformation.CalculateFooterCheckSum = ABlockInfo.DebugInformation.DebugFooterPtr^) then
     begin
-      {The block is still flagged as containing debug information, so one of two scenarios are possible:
-      1) The block header or footer has been corrupted
-      2) The block is being freed, and FastMM_FreeMem_FreeDebugBlock has completed updating the headers and footers}
+      Break;
+    end;
+
+    {Is the block still flagged as containing debug info?  If not then another thread is either manipulating its debug
+    information or it is a small block for which the header wasn't set yet.  We therefore assume that the block is
+    intact.}
+    if not BlockHasDebugInfo(ABlockInfo.DebugInformation) then
+      Exit;
+
+    {If the retry attempts have been exhausted then we accept that the block has been corrupted.}
+    Dec(LRemainingAttempts);
+    if LRemainingAttempts = 0 then
+    begin
+      {Check one last time and log the block corruption, if present.}
       if not CheckDebugBlockHeaderAndFooterCheckSumsValid(ABlockInfo.DebugInformation) then
         System.Error(reInvalidPtr);
-    end
-    else
-    begin
-      {The "debug info" flag in the block header is not currently set.  This means that the debug header and footer are
-      currently being updated inside FastMM_FreeMem_FreeDebugBlock before the block is actually freed.}
-      Exit;
+      Break;
     end;
+
   end;
 
-  {If it is a free block, check whether it has been modified after being freed.}
+  {If it is a free block, check whether it has been modified after being freed.  A free debug block should never be
+  modified while the arena is locked, so we do not have to retry this check.}
   if ABlockInfo.BlockIsFree and (not CheckFreedDebugBlockFillPatternIntact(ABlockInfo.DebugInformation)) then
     System.Error(reInvalidPtr);
 end;
@@ -9332,23 +9446,30 @@ end;
 
 {FastMM_LogStateToFile node sort compare methods.  Returns <0 if ANode1 sorts before ANode2, 0 if they sort equally,
 and >0 if ANode1 must sort after ANode2.}
-
 function FastMM_LogStateToFile_NodeSortCompare_Alphabetical(const ANode1, ANode2: TMemoryLogNode): Integer;
 const
   CMaxContentDescriptionLength = 256;
 var
   LContent1, LContent2: array[0..CMaxContentDescriptionLength - 1] of WideChar;
-  i: Integer;
+  LLen1, LLen2, LMinLen, i: Integer;
 begin
-  BlockContentTypeToTextBuffer(ANode1.BlockContentType, @LContent1, @LContent1[CMaxContentDescriptionLength - 1]);
-  BlockContentTypeToTextBuffer(ANode2.BlockContentType, @LContent2, @LContent2[CMaxContentDescriptionLength - 1]);
+  LLen1 := (NativeUInt(BlockContentTypeToTextBuffer(ANode1.BlockContentType, @LContent1, @LContent1[CMaxContentDescriptionLength - 1]))
+    - NativeUInt(@LContent1)) div SizeOf(WideChar);
+  LLen2 := (NativeUInt(BlockContentTypeToTextBuffer(ANode2.BlockContentType, @LContent2, @LContent2[CMaxContentDescriptionLength - 1]))
+    - NativeUInt(@LContent2)) div SizeOf(WideChar);
 
-  for i := 0 to CMaxContentDescriptionLength - 1 do
+  if LLen1 < LLen2 then
+    LMinLen := LLen1
+  else
+    LMinLen := LLen2;
+  for i := 0 to LMinLen - 1 do
   begin
     Result := Ord(LContent1[i]) - Ord(LContent2[i]);
     if Result <> 0 then
-      Break;
+      Exit;
   end;
+
+  Result := LLen1 - LLen2;
 end;
 
 function FastMM_LogStateToFile_NodeSortCompare_DescendingMemoryUsage(const ANode1, ANode2: TMemoryLogNode): Integer;
@@ -9479,7 +9600,7 @@ var
   LExistingFileAction: TTextFileAlreadyExistsAction;
 begin
   {Get the current memory manager usage summary.}
-  LMemoryManagerUsageSummary := FastMM_GetUsageSummary;
+  LMemoryManagerUsageSummary := FastMM_GetUsageSummary(ALockTimeoutMilliseconds);
 
   {Allocate the memory required to store the token buffer, log text, as well as the detailed allocation information.}
   LBufferSize := SizeOf(TMemoryLogInfo) + (CTokenBufferMaxWideChars + CStateLogMaxChars) * SizeOf(Char);
@@ -10892,6 +11013,8 @@ begin
   DebugLibrary_GetFrameBasedStackTrace := nil;
   DebugLibrary_LogStackTrace_Legacy := nil;
 {$endif}
+
+  DebugSupportConfigured := False;
 
   Result := True;
 end;
