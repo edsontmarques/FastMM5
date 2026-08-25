@@ -10571,7 +10571,7 @@ begin
         end
         else
           Result := @MoveMultipleOf64_Large;
-      end 
+      end
       else if (ASmallBlockSize and 31) = 0 then
       begin
 {$ifdef X86ASM}
@@ -10580,7 +10580,7 @@ begin
         else
 {$endif}
           Result := @MoveMultipleOf32;
-      end 
+      end
       else if (ASmallBlockSize and 15) = 0 then
       begin
 {$ifdef X86ASM}
@@ -10591,7 +10591,7 @@ begin
           Result := @MoveMultipleOf16;
 {$ifdef 32Bit}
       {Under 64-bit there are no block sizes that are a multiple of 8.}
-      end 
+      end
       else if (ASmallBlockSize and 7) = 0 then
       begin
         Result := @MoveMultipleOf8;
