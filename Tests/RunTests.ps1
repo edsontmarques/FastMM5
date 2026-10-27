@@ -43,19 +43,30 @@ $work = Join-Path ([IO.Path]::GetTempPath()) 'FastMM5Tests'
 $compilerPathsFile = Join-Path $srcDir 'CompilerPaths.txt'
 
 # The tests, with the arguments to run them with.  The stress tests take a while,
-# so -Quick shortens them;  the others ignore their arguments.
+# so -Quick shortens them;  the others ignore their arguments.  A test with
+# debugLibrary set gets the path of the debug support library as its first
+# argument.
 $Tests = @(
   @{ name = 'FastMM5Test_DebugMode';          args = @();            quickArgs = @() }
   @{ name = 'FastMM5Test_SizeClasses';        args = @();            quickArgs = @() }
   @{ name = 'FastMM5Test_UsagePerSizeClass';  args = @();            quickArgs = @() }
   @{ name = 'FastMM5Test_ModeTransition';     args = @();            quickArgs = @() }
+  @{ name = 'FastMM5Test_EraseModes';         args = @('20000');     quickArgs = @('5000') }
   @{ name = 'FastMM5Test_DoubleFree';         args = @('2000');      quickArgs = @('2000') }
   @{ name = 'FastMM5Test_ScanCoverage';       args = @();            quickArgs = @() }
   @{ name = 'FastMM5Test_ScanHeaderBounds';   args = @();            quickArgs = @() }
   @{ name = 'FastMM5Test_ScanRace';           args = @('10', '4');   quickArgs = @('3', '4') }
   @{ name = 'FastMM5Test_MultiThreadStress';  args = @('4', '20000', '70000', '1', '1')
                                               quickArgs = @('4', '5000', '70000', '1', '1') }
+  @{ name = 'FastMM5Test_StackTraces';        args = @();            quickArgs = @(); debugLibrary = $true }
 )
+
+$debugLibrarySource = Join-Path $rootDir 'FullDebugMode DLL\FastMM_FullDebugMode.dpr'
+# The debug support library source includes "{$R *.res}", but the .res file is
+# not in the repository, because the IDE generates it.  So the build gets an
+# empty .res file through the resource search path instead.  It consists of the
+# empty entry that every .res file starts with, and nothing else.
+$emptyResourceFile = [byte[]](0,0,0,0, 0x20,0,0,0, 0xFF,0xFF,0,0, 0xFF,0xFF,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0)
 
 # A sortable numeric key from a version string like "23.0" or "10.4".  Parsed by
 # hand rather than cast to a number, because a cast would depend on the locale's
@@ -243,6 +254,18 @@ foreach ($install in $selected) {
     Write-Host ''
     Write-Host "===================== $(Format-Installation $install) / $platform ====================="
 
+    # Build the debug support library.  It is built without a stack tracing
+    # library (ModuleAndOffsetOnly), so that the JCL is not needed.  It goes into
+    # a directory of its own, so that the other tests do not load it when they
+    # enter debug mode.
+    $dllDir = Join-Path $outDir 'DebugSupportLibrary'
+    New-Item -ItemType Directory -Path $dllDir | Out-Null
+    [IO.File]::WriteAllBytes((Join-Path $dllDir 'FastMM_FullDebugMode.res'), $emptyResourceFile)
+    if ($platform -eq 'Win64') { $dllName = 'FastMM_FullDebugMode64.dll' } else { $dllName = 'FastMM_FullDebugMode.dll' }
+    $dllPath = Join-Path $dllDir $dllName
+    $dllBuildOutput = & $info.exe -B -Q -DModuleAndOffsetOnly "-U$($info.lib)" "-O$($info.lib)" "-R$dllDir" `
+      '-NSSystem;System.Win;Winapi' "-N$dllDir" "-E$dllDir" $debugLibrarySource 2>&1
+
     foreach ($test in $Tests) {
       $dpr = Join-Path $srcDir "$($test.name).dpr"
       $exe = Join-Path $outDir "$($test.name).exe"
@@ -258,14 +281,22 @@ foreach ($install in $selected) {
           "-O$($info.lib)" '-NSSystem;System.Win;Winapi;Vcl' "-N$outDir" "-E$outDir" $dpr 2>&1
       } finally { Pop-Location }
 
-      if (-not (Test-Path $exe)) {
+      $built = Test-Path $exe
+      if ($built -and $test.debugLibrary -and (-not (Test-Path $dllPath))) {
+        $built = $false
+        $buildOutput = $dllBuildOutput
+      }
+      if (-not $built) {
         Write-Host ("  {0,-34} BUILD FAILED" -f $test.name)
         $buildOutput | Select-Object -Last 5 | ForEach-Object { Write-Host "      $_" }
         $results.Add([pscustomobject]@{ Compiler = $install.Name; Platform = $platform; Test = $test.name; Outcome = 'build failed' })
         continue
       }
 
-      $testArgs = if ($Quick) { $test.quickArgs } else { $test.args }
+      # @() keeps a single argument an array:  splatting a plain string would pass
+      # each of its characters as a separate argument.
+      $testArgs = @(if ($Quick) { $test.quickArgs } else { $test.args })
+      if ($test.debugLibrary) { $testArgs = @($dllPath) + $testArgs }
       $output = & $exe @testArgs 2>&1
       $code = $LASTEXITCODE
       if ($VerboseOutput) { $output | ForEach-Object { Write-Host "      $_" } }
